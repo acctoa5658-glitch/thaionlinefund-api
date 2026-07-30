@@ -2,23 +2,26 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const axios = require('axios'); // เพิ่ม axios สำหรับยิง API Thaibulksms
+const axios = require('axios'); 
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'thaionlinefund_super_secure_secret';
 
-// ตั้งค่า Thaibulksms API (เดี๋ยวเราจะไปใส่ในเว็บ Render ทีหลัง)
 const TBS_API_KEY = process.env.TBS_API_KEY || 'ใส่_API_KEY_ที่นี่';
 const TBS_API_SECRET = process.env.TBS_API_SECRET || 'ใส่_API_SECRET_ที่นี่';
 
 // Middleware
 app.use(cors());
+app.use(express.json());
+
+// Mock Database
+let usersData = [
     { id: 'admin1', name: 'Webmaster', email: 'admin@thaionlinefund.com', passwordHash: bcrypt.hashSync('password', 10), role: 'admin', status: 'approved', phone: '0800000000', userType: 'admin', createdAt: Date.now() }
 ];
 
 let projectsData = [];
-let otpStore = {}; // หน่วยความจำชั่วคราวสำหรับเก็บรหัส OTP 
+let otpStore = {}; 
 
 // --- Middleware ตรวจ Token ---
 const verifyToken = (req, res, next) => {
@@ -53,7 +56,7 @@ app.post('/api/auth/login', async (req, res) => {
     const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
     const refCode = Math.random().toString(36).substring(2, 6).toUpperCase();
     
-    // 2. บันทึก OTP ไว้ในระบบ ให้เวลา 5 นาที (300000 ms) ก่อนหมดอายุ
+    // 2. บันทึก OTP ไว้ในระบบ ให้เวลา 5 นาที
     otpStore[user.id] = { otp: otpCode, expires: Date.now() + 300000 };
 
     // 3. ส่ง SMS จริงผ่าน Thaibulksms
@@ -63,32 +66,30 @@ app.post('/api/auth/login', async (req, res) => {
             params.append('apiKey', TBS_API_KEY);
             params.append('apiSecret', TBS_API_SECRET);
             params.append('msisdn', user.phone);
-            params.append('message', `รหัส OTP สำหรับเข้าสู่ระบบ ThaiOnlineFund คือ ${otpCode} (Ref: ${refCode}) ห้ามบอกรหัสนี้กับผู้อื่น`);
-            params.append('sender', 'SMS'); // ชื่อผู้ส่ง (ถ้าไม่ได้ซื้อชื่อไว้ จะขึ้นว่า SMS)
+            params.append('message', `รหัส OTP ของคุณคือ ${otpCode} (Ref: ${refCode})`);
+            params.append('sender', 'SMS'); 
 
             await axios.post('https://api-v2.thaibulksms.com/sms', params);
             console.log(`ส่ง SMS ไปที่เบอร์ ${user.phone} สำเร็จ`);
         } else {
-            console.log(`[โหมดทดสอบ] ไม่ได้ใส่ API Key -- OTP สำหรับเบอร์ ${user.phone} คือ: ${otpCode}`);
+            console.log(`[โหมดทดสอบ] OTP คือ: ${otpCode}`);
         }
     } catch (err) {
-        console.error("SMS Error:", err.response ? err.response.data : err.message);
-        return res.status(500).json({ error: 'ไม่สามารถส่ง SMS ได้ โปรดตรวจสอบว่าเบอร์ถูกต้องและเครดิต SMS คงเหลือ' });
+        console.error("SMS Error:", err.message);
+        return res.status(500).json({ error: 'ไม่สามารถส่ง SMS ได้ โปรดตรวจสอบเครดิต' });
     }
 
     res.json({ userId: user.id, ref: refCode, message: 'ส่งรหัส OTP ไปยังเบอร์มือถือแล้ว' });
 });
 
-// เพิ่ม API สำหรับตรวจรหัส OTP ที่ผู้ใช้กรอกเข้ามา
 app.post('/api/auth/verify-otp', (req, res) => {
     const { userId, otp } = req.body;
     const record = otpStore[userId];
 
     if (!record) return res.status(400).json({ error: 'ไม่พบคำขอ OTP หรือรหัสหมดอายุแล้ว' });
-    if (Date.now() > record.expires) return res.status(400).json({ error: 'รหัส OTP หมดอายุแล้ว (เกิน 5 นาที)' });
+    if (Date.now() > record.expires) return res.status(400).json({ error: 'รหัส OTP หมดอายุแล้ว' });
     if (record.otp !== otp) return res.status(400).json({ error: 'รหัส OTP ไม่ถูกต้อง' });
 
-    // ถ้ารหัสถูก ให้ลบรหัสทิ้ง และอนุญาตให้เข้าสู่ระบบ (ออก Token)
     delete otpStore[userId];
     const user = usersData.find(u => u.id === userId);
     const token = jwt.sign({ id: user.id, role: user.role, status: user.status, name: user.name }, JWT_SECRET, { expiresIn: '15m' });
