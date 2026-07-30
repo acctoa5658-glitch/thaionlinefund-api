@@ -17,7 +17,8 @@ app.use(express.json());
 
 // Mock Database
 let usersData = [
-    { id: 'admin1', name: 'Webmaster', email: 'admin@thaionlinefund.com', passwordHash: bcrypt.hashSync('password', 10), role: 'admin', status: 'approved', phone: '0800000000', userType: 'admin', createdAt: Date.now() }
+    // ตรวจสอบตรงนี้: เปลี่ยน 0800000000 เป็นเบอร์มือถือจริงๆ ของคุณ (เช่น 0812345678)
+    { id: 'admin1', name: 'Webmaster', email: 'admin@thaionlinefund.com', passwordHash: bcrypt.hashSync('password', 10), role: 'admin', status: 'approved', phone: '0812345678', userType: 'admin', createdAt: Date.now() }
 ];
 
 let projectsData = [];
@@ -52,34 +53,40 @@ app.post('/api/auth/login', async (req, res) => {
     const user = usersData.find(u => u.email === req.body.email);
     if (!user || !(await bcrypt.compare(req.body.password, user.passwordHash))) return res.status(400).json({ error: 'อีเมลหรือรหัสผ่านไม่ถูกต้อง' });
     
-    // 1. สุ่มรหัส OTP 6 หลัก และรหัสอ้างอิง (Ref)
+    // --- ระบบพิเศษ: ถ้าเป็น Admin ให้เข้าสู่ระบบได้เลย ไม่ต้องใช้ OTP ---
+    if (user.role === 'admin') {
+        const token = jwt.sign({ id: user.id, role: user.role, status: user.status, name: user.name }, JWT_SECRET, { expiresIn: '15m' });
+        return res.json({ token, user, message: 'ผู้ดูแลระบบเข้าสู่ระบบสำเร็จ' });
+    }
+
+    // --- ระบบสมาชิกปกติ: สุ่มรหัส OTP และบันทึกลงหน่วยความจำ ---
     const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
     const refCode = Math.random().toString(36).substring(2, 6).toUpperCase();
-    
-    // 2. บันทึก OTP ไว้ในระบบ ให้เวลา 5 นาที
-    otpStore[user.id] = { otp: otpCode, expires: Date.now() + 300000 };
+    otpStore[user.id] = { otp: otpCode, expires: Date.now() + 300000 }; // OTP หมดอายุใน 5 นาที
 
-    // 3. ส่ง SMS จริงผ่าน Thaibulksms
+    // ส่ง SMS ผ่าน Thaibulksms ไปยังเบอร์ "ที่ผู้ใช้กรอกตอนสมัครสมาชิก (user.phone)"
     try {
-        if (TBS_API_KEY !== 'ใส่_API_KEY_ที่นี่') {
+        if (TBS_API_KEY && TBS_API_KEY !== 'ใส่_API_KEY_ที่นี่') {
             const params = new URLSearchParams();
             params.append('apiKey', TBS_API_KEY);
             params.append('apiSecret', TBS_API_SECRET);
-            params.append('msisdn', user.phone);
+            params.append('msisdn', user.phone); 
             params.append('message', `รหัส OTP ของคุณคือ ${otpCode} (Ref: ${refCode})`);
-            params.append('sender', 'SMS'); 
+            params.append('sender', 'OTP_SMS'); // ชื่อผู้ส่งต้องตรงกับที่ Thaibulksms อนุมัติ
 
             await axios.post('https://api-v2.thaibulksms.com/sms', params);
             console.log(`ส่ง SMS ไปที่เบอร์ ${user.phone} สำเร็จ`);
         } else {
-            console.log(`[โหมดทดสอบ] OTP คือ: ${otpCode}`);
+            console.log(`[โหมดทดสอบ] ส่งไปที่ ${user.phone}, OTP คือ: ${otpCode}`);
         }
     } catch (err) {
-        console.error("SMS Error:", err.message);
-        return res.status(500).json({ error: 'ไม่สามารถส่ง SMS ได้ โปรดตรวจสอบเครดิต' });
+        // ดึง Error ของจริงจาก Thaibulksms มาแสดงให้รู้สาเหตุ
+        const realError = err.response && err.response.data && err.response.data.error ? err.response.data.error.description : err.message;
+        console.error("SMS Error Details:", realError);
+        return res.status(500).json({ error: `ระบบ SMS ขัดข้อง: ${realError}` });
     }
 
-    res.json({ userId: user.id, ref: refCode, message: 'ส่งรหัส OTP ไปยังเบอร์มือถือแล้ว' });
+    res.json({ userId: user.id, ref: refCode, message: 'ส่งรหัส OTP ไปยังเบอร์มือถือของคุณแล้ว' });
 });
 
 app.post('/api/auth/verify-otp', (req, res) => {
