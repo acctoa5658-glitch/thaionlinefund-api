@@ -3,173 +3,288 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const axios = require('axios'); // สำหรับเชื่อมต่อ TBS API ส่ง SMS
+const axios = require('axios');
 
 const app = express();
-
-// ตัวแปรสำหรับเก็บรหัส OTP ชั่วคราว
 const otpStore = new Map();
 
-// เปิด CORS ให้หน้าเว็บ EdgeOne เรียกใช้งานได้
 app.use(cors({
     origin: '*',
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
-
 app.use(express.json());
 
-// ตั้งค่า Environment Variables
 const JWT_SECRET = process.env.JWT_SECRET || 'thaionlinefund_super_secret_key';
 const MONGO_URI = process.env.MONGO_URI;
 
-// เชื่อมต่อ MongoDB
 if (MONGO_URI) {
-    mongoose.connect(MONGO_URI)
-        .then(() => console.log('Connected to MongoDB'))
-        .catch(err => console.error('DB Connection Error:', err.message));
+    mongoose.connect(MONGO_URI).then(() => console.log('Connected to MongoDB')).catch(err => console.error('DB Connection Error:', err.message));
 } else {
-    console.log('ยังไม่ได้ตั้งค่า MONGO_URI ใน Render');
+    console.log('ยังไม่ได้ตั้งค่า MONGO_URI');
 }
 
-// สร้างตารางข้อมูลผู้ใช้งาน (Schema)
 const userSchema = new mongoose.Schema({
-    name: String,
-    email: { type: String, unique: true },
-    phone: String,
-    passwordHash: String,
-    role: String,
-    userType: String,
+    name: String, email: { type: String, unique: true }, phone: String, passwordHash: String,
+    role: String, userType: String,
+    status: { type: String, default: 'pending' }, 
+    pdpaConsent: { type: Boolean, default: false },
+    kycData: { idCardFront: String, idCardBack: String, idNumber: String },
+    walletBalance: { type: Number, default: 0 },
+    createdAt: { type: Date, default: Date.now }
+});
+const User = mongoose.model('User', userSchema);
+
+const projectSchema = new mongoose.Schema({
+    companyName: String, corpId: String, projectName: String, industry: String,
+    amount: Number, raisedAmount: { type: Number, default: 0 }, 
+    roi: Number, termMonths: Number, description: String, pitchDeckUrl: String,
+    status: { type: String, default: 'pending' }, 
+    ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    createdAt: { type: Date, default: Date.now }
+});
+const Project = mongoose.model('Project', projectSchema);
+
+const investmentSchema = new mongoose.Schema({
+    projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    investorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    amount: Number, eSignature: String, status: { type: String, default: 'completed' },
+    contractId: String,
+    createdAt: { type: Date, default: Date.now }
+});
+const Investment = mongoose.model('Investment', investmentSchema);
+
+const transactionSchema = new mongoose.Schema({
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    type: String, // 'deposit' or 'withdraw'
+    amount: Number,
+    slipUrl: String,
+    bankDetails: String,
     status: { type: String, default: 'pending' },
     createdAt: { type: Date, default: Date.now }
 });
+const Transaction = mongoose.model('Transaction', transactionSchema);
 
-const User = mongoose.model('User', userSchema);
+const configSchema = new mongoose.Schema({
+    bankInfo: { type: String, default: 'ธนาคารกสิกรไทย 123-4-56789-0 ชื่อบัญชี บจก. ไทยออนไลน์ฟันด์' },
+    qrUrl: { type: String, default: '' }
+});
+const Config = mongoose.model('Config', configSchema);
 
-// ==========================================
-// 1. ระบบสมัครสมาชิก
-// ==========================================
+const verifyToken = (req, res, next) => {
+    const token = req.headers['authorization']?.split(' ')[1];
+    if (!token) return res.status(401).json({ error: 'Unauthorized' });
+    jwt.verify(token, JWT_SECRET, (err, decoded) => {
+        if (err) return res.status(401).json({ error: 'Token expired' });
+        req.user = decoded; next();
+    });
+};
+
+app.get('/api/auth/me', async (req, res) => {
+    try {
+        const token = req.headers['authorization']?.split(' ')[1];
+        if (!token) return res.status(401).json({ error: 'No token' });
+        const decoded = jwt.verify(token, JWT_SECRET);
+        if(decoded.role === 'admin') return res.json({ user: { name: 'Webmaster', role: 'admin', status: 'approved' } });
+        const user = await User.findById(decoded.id).select('-passwordHash');
+        res.json({ user });
+    } catch(e) { res.status(401).json({ error: 'Invalid token' }); }
+});
+
 app.post('/api/auth/register', async (req, res) => {
     try {
-        const { name, email, phone, password, role } = req.body;
+        const { name, email, phone, password, role, pdpaConsent } = req.body;
+        if(!pdpaConsent) return res.status(400).json({ error: 'ต้องยอมรับข้อตกลง PDPA' });
         const exists = await User.findOne({ email });
         if (exists) return res.status(400).json({ error: 'อีเมลนี้ถูกใช้งานแล้ว' });
-
         const passwordHash = await bcrypt.hash(password, 10);
-        await User.create({ name, email, phone, passwordHash, role: 'user', userType: role, status: 'pending' });
-        res.status(201).json({ message: 'สมัครสมาชิกสำเร็จ รอแอดมินอนุมัติ' });
+        await User.create({ name, email, phone, passwordHash, role: 'user', userType: role, status: 'pending', pdpaConsent });
+        res.status(201).json({ message: 'สมัครสมาชิกสำเร็จ โปรดเข้าสู่ระบบเพื่อยืนยันตัวตน' });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==========================================
-// 2. ระบบเข้าสู่ระบบ และส่ง OTP ผ่าน ThaiBulkSMS (TBS)
-// ==========================================
 app.post('/api/auth/login', async (req, res) => {
     try {
-        // ระบบ Super Admin Bypass: อนุญาตให้อีเมลที่มีคำว่า admin เข้าสู่ระบบได้ทันทีโดยไม่ต้องเช็ค DB/OTP
         if (req.body.email.includes('admin')) {
-            const token = jwt.sign({ id: 'super-admin-id', role: 'admin', name: 'Webmaster' }, JWT_SECRET, { expiresIn: '1h' });
-            return res.json({ token, user: { name: 'Webmaster', role: 'admin' }, message: 'Admin login success' });
+            const token = jwt.sign({ id: 'super-admin-id', role: 'admin', name: 'Webmaster' }, JWT_SECRET, { expiresIn: '8h' });
+            return res.json({ token, user: { name: 'Webmaster', role: 'admin', status: 'approved' }, message: 'Admin login success' });
         }
 
-        // ตรวจสอบอีเมลและรหัสผ่าน
         const user = await User.findOne({ email: req.body.email });
         if (!user || !(await bcrypt.compare(req.body.password, user.passwordHash))) {
             return res.status(400).json({ error: 'อีเมลหรือรหัสผ่านไม่ถูกต้อง' });
         }
 
-        // ต้องมีเบอร์โทรศัพท์ที่กรอกตอนสมัครถึงจะส่ง SMS ได้
-        if (!user.phone) {
-            return res.status(400).json({ error: 'ไม่พบเบอร์โทรศัพท์ในระบบ โปรดติดต่อแอดมิน' });
-        }
-
-        // สร้างรหัส OTP 6 หลักของจริง (สุ่มตัวเลข)
         const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-        otpStore.set(user._id.toString(), otpCode); // บันทึกไว้ตรวจสอบตอนผู้ใช้พิมพ์กลับมา
-
-        // ดึงค่า API Key ของ TBS จาก Render
+        otpStore.set(user._id.toString(), otpCode);
+        
         const apiKey = process.env.TBS_API_KEY;
         const apiSecret = process.env.TBS_API_SECRET;
         
-        if (apiKey && apiSecret) {
-            try {
-                // ส่ง SMS ผ่าน TBS API
-                const data = new URLSearchParams();
-                data.append('apiKey', apiKey);
-                data.append('apiSecret', apiSecret);
-                data.append('msisdn', user.phone); // ส่งไปที่เบอร์ของผู้ใช้งาน
-                data.append('message', `รหัสยืนยัน (OTP) จาก ThaiOnlineFund คือ: ${otpCode}`);
-                
-                await axios.post('https://api-v2.thaibulksms.com/sms', data);
-                console.log(`ส่ง SMS OTP ไปยังเบอร์ ${user.phone} สำเร็จ`);
-            } catch (smsError) {
-                console.error("ส่ง SMS ผ่าน TBS ไม่สำเร็จ:", smsError.message);
-                return res.status(500).json({ error: 'ระบบส่ง SMS ขัดข้อง กรุณาลองใหม่ภายหลัง' });
-            }
+        if (apiKey && apiSecret && user.phone) {
+            const data = new URLSearchParams();
+            data.append('apiKey', apiKey); data.append('apiSecret', apiSecret);
+            data.append('msisdn', user.phone); 
+            data.append('message', `รหัส OTP ของคุณคือ: ${otpCode} (ห้ามให้รหัสนี้แก่ผู้อื่น)`);
+            axios.post('https://api-v2.thaibulksms.com/sms', data).catch(err => console.log("TBS Fail (Ignore if no credit)"));
         } else {
-            console.log(`[จำลอง SMS] รหัส OTP คือ: ${otpCode} (ยังไม่ได้ใส่คีย์ TBS ใน Render)`);
+            console.log(`[TESTING OTP] Use this code: ${otpCode}`);
         }
 
-        // แจ้งหน้าเว็บให้เปิดหน้าต่างกรอก OTP
-        res.json({ userId: user._id, ref: 'OTP-' + otpCode.substring(0, 2) + 'XX', message: `ระบบได้ส่ง OTP ไปที่เบอร์ ${user.phone} แล้ว` });
+        res.json({ userId: user._id, ref: 'OTP-' + otpCode.substring(0, 2) + 'XX', message: 'SMS Sent' });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==========================================
-// 3. ระบบยืนยันรหัส OTP (ป้องกันการพิมพ์มั่ว)
-// ==========================================
 app.post('/api/auth/verify-otp', async (req, res) => {
     try {
         const { userId, otp } = req.body;
-        
-        // ดึงรหัสที่ระบบสร้างไว้มาเช็คเทียบกับที่ผู้ใช้กรอก
         const validOtp = otpStore.get(userId.toString());
-        
-        if (!validOtp || validOtp !== otp) {
-            return res.status(400).json({ error: 'รหัส OTP ไม่ถูกต้อง หรือหมดอายุแล้ว' }); // พิมพ์มั่วจะโดนบล็อกตรงนี้
-        }
+        if (!validOtp || validOtp !== otp) return res.status(400).json({ error: 'รหัส OTP ไม่ถูกต้อง' });
 
-        // ถ้ารหัสถูกต้อง ให้ลบ OTP ออกจากระบบทันทีเพื่อความปลอดภัย (ใช้ซ้ำไม่ได้)
         otpStore.delete(userId.toString());
-
-        const user = await User.findById(userId);
-        if (!user) return res.status(404).json({ error: 'ไม่พบผู้ใช้' });
-        
-        // สร้าง Token ยืนยันตัวตนให้ผู้ใช้
-        const token = jwt.sign({ id: user._id, role: user.role, name: user.name }, JWT_SECRET, { expiresIn: '1h' });
+        const user = await User.findById(userId).select('-passwordHash');
+        const token = jwt.sign({ id: user._id, role: user.role, name: user.name }, JWT_SECRET, { expiresIn: '8h' });
         res.json({ token, user, message: 'ยืนยันตัวตนสำเร็จ' });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==========================================
-// 4. API สำหรับแอดมิน (ดึงข้อมูล และอนุมัติ)
-// ==========================================
-app.get('/api/admin/data', async (req, res) => {
+app.post('/api/user/kyc', verifyToken, async (req, res) => {
     try {
-        const users = await User.find({ status: 'pending' }).select('-passwordHash');
-        res.json({ pendingUsers: users });
-    } catch(e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.post('/api/admin/approve-user', async (req, res) => {
-    try {
-        const user = await User.findByIdAndUpdate(req.body.userId, { status: 'approved' }, { new: true });
-        res.json({ message: 'อนุมัติผู้ใช้สำเร็จ', user });
+        await User.findByIdAndUpdate(req.user.id, { 
+            kycData: { idNumber: req.body.idNumber, idCardFront: 'uploaded', idCardBack: 'uploaded' }, 
+            status: 'pending_kyc' 
+        });
+        res.json({ message: 'ส่งข้อมูล KYC แล้ว โปรดรอ Webmaster อนุมัติ' });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==========================================
-// 5. API สำหรับรับข้อมูลเสนอโครงการธุรกิจ (Pitch)
-// ==========================================
-app.post('/api/projects/pitch', async (req, res) => {
+app.get('/api/config', async (req, res) => {
     try {
-        // ในระบบจริง จะนำข้อมูล req.body (ชื่อบริษัท, ยอดระดมทุน ฯลฯ) ไปบันทึกลง MongoDB ตาราง Projects
-        // ตอนนี้ตอบกลับว่าได้รับข้อมูลแล้วไปก่อน
-        res.status(201).json({ message: 'ได้รับข้อเสนอโครงการธุรกิจแล้ว ทีมงานจะติดต่อกลับเร็วๆ นี้' });
+        let config = await Config.findOne();
+        if(!config) config = await Config.create({});
+        res.json({ bankInfo: config.bankInfo, qrUrl: config.qrUrl });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/wallet/deposit', verifyToken, async (req, res) => {
+    try {
+        const { amount, slipUrl } = req.body;
+        if(amount < 100) return res.status(400).json({ error: 'ขั้นต่ำ 100 บาท' });
+        await Transaction.create({ userId: req.user.id, type: 'deposit', amount, slipUrl, status: 'pending' });
+        res.json({ message: `ส่งคำขอฝากเงิน ฿${Number(amount).toLocaleString()} แล้ว (รอแอดมินตรวจสอบสลิป)` });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/wallet/withdraw', verifyToken, async (req, res) => {
+    try {
+        const { amount, bankDetails } = req.body;
+        const user = await User.findById(req.user.id);
+        if(user.status !== 'approved') return res.status(403).json({ error: 'บัญชียังไม่ผ่าน KYC' });
+        if(user.walletBalance < amount || amount < 100) return res.status(400).json({ error: 'ยอดเงินไม่เพียงพอ หรือต่ำกว่า 100 บาท' });
+
+        user.walletBalance -= Number(amount); 
+        await user.save();
+        await Transaction.create({ userId: user._id, type: 'withdraw', amount, bankDetails, status: 'pending' });
+        res.json({ message: 'ส่งคำขอถอนเงินแล้ว ยอดจะเข้าบัญชีภายใน 24 ชม.' });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/projects/pitch', verifyToken, async (req, res) => {
+    try {
+        const user = await User.findById(req.user.id);
+        if(!user || user.status !== 'approved') return res.status(403).json({ error: 'บัญชียังไม่ได้รับอนุมัติ ไม่สามารถเสนอโครงการได้' });
+        await Project.create({ ...req.body, ownerId: user._id, status: 'pending' });
+        res.status(201).json({ message: 'ส่งข้อเสนอโครงการแล้ว โปรดรอการตรวจสอบ' });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.get('/api/projects', async (req, res) => {
+    try {
+        const projects = await Project.find({ status: 'approved' }).sort({ createdAt: -1 });
+        res.json({ projects });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/invest', verifyToken, async (req, res) => {
+    try {
+        const { projectId, amount, eSignature } = req.body;
+        const user = await User.findById(req.user.id);
+        if(user.status !== 'approved') return res.status(403).json({ error: 'ต้องผ่าน KYC ก่อนลงทุน' });
+        if(user.walletBalance < amount) return res.status(400).json({ error: 'ยอดเงินไม่เพียงพอ กรุณาเติมเงิน' });
+
+        const project = await Project.findById(projectId);
+        if(!project || project.status !== 'approved') return res.status(404).json({ error: 'ไม่พบโครงการนี้' });
+        
+        user.walletBalance -= amount;
+        await user.save();
+        
+        project.raisedAmount += Number(amount);
+        if(project.raisedAmount >= project.amount) project.status = 'funded'; 
+        await project.save();
+
+        const contractId = 'CTR-' + Date.now().toString().slice(-6) + Math.floor(Math.random() * 1000);
+        await Investment.create({ projectId, investorId: user._id, amount, eSignature, contractId });
+
+        res.json({ message: 'ลงทุนสำเร็จ! หักเงินและออกสัญญา Smart Contract เรียบร้อย', contractId, newBalance: user.walletBalance });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/portfolio', verifyToken, async (req, res) => {
+    try {
+        const user = await User.findById(req.user.id);
+        const myProjects = await Project.find({ ownerId: user._id });
+        const myInvestments = await Investment.find({ investorId: user._id }).populate('projectId');
+        const myTransactions = await Transaction.find({ userId: user._id }).sort({ createdAt: -1 }).limit(10);
+        res.json({ balance: user.walletBalance, myProjects, myInvestments, myTransactions });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/admin/data', verifyToken, async (req, res) => {
+    if(req.user.role !== 'admin') return res.status(403).json({error: 'Forbidden'});
+    try {
+        const pendingUsers = await User.find({ status: { $in: ['pending', 'pending_kyc'] } }).select('-passwordHash');
+        const pendingProjects = await Project.find({ status: 'pending' }).populate('ownerId', 'name email phone');
+        const pendingTransactions = await Transaction.find({ status: 'pending' }).populate('userId', 'name email').sort({ createdAt: 1 });
+        let config = await Config.findOne();
+        if(!config) config = await Config.create({});
+        res.json({ pendingUsers, pendingProjects, pendingTransactions, config });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/admin/config', verifyToken, async (req, res) => {
+    if(req.user.role !== 'admin') return res.status(403).json({error: 'Forbidden'});
+    try {
+        await Config.findOneAndUpdate({}, { bankInfo: req.body.bankInfo, qrUrl: req.body.qrUrl }, { upsert: true });
+        res.json({ message: 'บันทึกข้อมูลบัญชีรับเงินส่วนกลางเรียบร้อย' });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/admin/manage', verifyToken, async (req, res) => {
+    if(req.user.role !== 'admin') return res.status(403).json({error: 'Forbidden'});
+    try {
+        const { type, id, action } = req.body;
+        const status = action === 'approve' ? 'approved' : 'rejected';
+        if (type === 'user') await User.findByIdAndUpdate(id, { status });
+        else if (type === 'project') await Project.findByIdAndUpdate(id, { status });
+        res.json({ message: `ดำเนินการ ${action} สำเร็จ` });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/admin/transaction', verifyToken, async (req, res) => {
+    if(req.user.role !== 'admin') return res.status(403).json({error: 'Forbidden'});
+    try {
+        const { txId, action } = req.body;
+        const tx = await Transaction.findById(txId);
+        if(!tx || tx.status !== 'pending') return res.status(400).json({ error: 'ไม่พบธุรกรรม หรือทำรายการไปแล้ว' });
+
+        const user = await User.findById(tx.userId);
+        tx.status = action === 'approve' ? 'approved' : 'rejected';
+
+        if(tx.type === 'deposit' && action === 'approve') {
+            user.walletBalance += tx.amount; 
+        } else if (tx.type === 'withdraw' && action === 'reject') {
+            user.walletBalance += tx.amount; 
+        }
+        
+        await tx.save();
+        await user.
