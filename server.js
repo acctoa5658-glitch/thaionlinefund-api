@@ -205,6 +205,30 @@ app.get('/api/projects', async (req, res) => {
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+app.get('/api/public/stats', async (req, res) => {
+    try {
+        const investments = await Investment.aggregate([
+            { $match: { status: 'completed' } },
+            { $group: { _id: null, total: { $sum: "$amount" } } }
+        ]);
+        const totalCapital = investments.length > 0 ? investments[0].total : 0;
+
+        const projects = await Project.aggregate([
+            { $match: { status: { $in: ['approved', 'funded', 'completed'] } } },
+            { $group: { _id: null, avgRoi: { $avg: "$roi" } } }
+        ]);
+        const avgRoi = projects.length > 0 ? projects[0].avgRoi : 0;
+
+        const fundedCount = await Project.countDocuments({ status: { $in: ['funded', 'completed', 'defaulted'] } });
+        const defaultCount = await Project.countDocuments({ status: 'defaulted' });
+        const defaultRate = fundedCount > 0 ? (defaultCount / fundedCount) * 100 : 0;
+
+        res.json({ totalCapital, avgRoi, defaultRate });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.post('/api/invest', verifyToken, async (req, res) => {
     try {
         const { projectId, amount, eSignature } = req.body;
@@ -287,4 +311,19 @@ app.post('/api/admin/transaction', verifyToken, async (req, res) => {
         }
         
         await tx.save();
-        await user.
+        await user.save();
+        res.json({ message: `ดำเนินการธุรกรรมสำเร็จ` });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.use((req, res) => {
+    res.status(404).json({ error: 'ไม่พบ Endpoint ที่ต้องการในระบบ API (404)' });
+});
+
+app.use((err, req, res, next) => {
+    console.error("Global Server Error:", err);
+    res.status(500).json({ error: 'เกิดข้อผิดพลาดภายในเซิร์ฟเวอร์ (500)' });
+});
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`Fintech API running on port ${PORT}`));
